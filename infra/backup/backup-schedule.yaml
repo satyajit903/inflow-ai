@@ -1,0 +1,80 @@
+# Backup Configuration
+# Automated backup schedules
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  namespace: inflow-prod
+spec:
+  schedule: "0 * * * *"  # Hourly
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: backup
+              image: postgres:15
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  pg_dump -h $DB_HOST -U $DB_USER $DB_NAME | \
+                  gzip | \
+                  aws s3 cp - s3://inflow-backups/postgres/backup_$(date +%Y%m%d_%H%M).sql.gz
+              envFrom:
+                - secretRef:
+                    name: db-credentials
+          restartPolicy: OnFailure
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: redis-backup
+  namespace: inflow-prod
+spec:
+  schedule: "0 2 * * *"  # Daily at 2am
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: backup
+              image: redis:7
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  redis-cli -h $REDIS_HOST BGSAVE
+                  sleep 10
+                  aws s3 cp /data/dump.rdb s3://inflow-backups/redis/dump_$(date +%Y%m%d).rdb
+          restartPolicy: OnFailure
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vault-backup
+  namespace: inflow-prod
+spec:
+  schedule: "0 3 * * *"  # Daily at 3am
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: vault-backup
+          containers:
+            - name: backup
+              image: vault:1.15
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  vault operator raft snapshot save /tmp/vault-snapshot.snap
+                  aws s3 cp /tmp/vault-snapshot.snap \
+                    s3://inflow-backups/vault/snapshot_$(date +%Y%m%d).snap
+          restartPolicy: OnFailure
